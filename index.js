@@ -11,16 +11,35 @@ app.post('/download', (req, res) => {
   if (!url) return res.status(400).json({ error: 'No URL' });
 
   console.log(`Processing: ${url}`);
-  
-  // yt-dlp возвращает прямую ссылку
-  const cmd = `yt-dlp -f "best[ext=mp4]/best" --get-url --no-warnings "${url}"`;
 
-  exec(cmd, (err, stdout) => {
+  // Для Instagram добавляем флаг --no-check-certificates и пробуем разные форматы
+  // Для TikTok yt-dlp обычно справляется сам, но добавим таймаут
+  let command = '';
+  
+  if (url.includes('instagram.com')) {
+    // Instagram требует обхода некоторых проверок
+    command = `yt-dlp -f "best[ext=mp4]/best" --get-url --no-warnings --ignore-errors "${url}"`;
+  } else {
+    // Стандартный запрос для TikTok и других
+    command = `yt-dlp -f "best[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --get-url --no-warnings "${url}"`;
+  }
+
+  // Добавляем таймаут 30 секунд, чтобы не вешать сервер
+  const options = { timeout: 30000 };
+
+  exec(command, options, (err, stdout, stderr) => {
     if (err || !stdout) {
-      console.error(err);
-      return res.status(500).json({ error: 'Failed' });
+      console.error('[YT-DLP ERROR]:', err?.message || stderr);
+      // Возвращаем конкретную ошибку, а не просто 500
+      return res.status(500).json({ 
+        error: 'Download failed', 
+        details: stderr ? stderr.substring(0, 200) : 'Unknown error' 
+      });
     }
-    res.json({ videoUrl: stdout.trim() });
+    
+    const videoUrl = stdout.trim();
+    console.log('Success:', videoUrl.substring(0, 80) + '...');
+    res.json({ videoUrl });
   });
 });
 
