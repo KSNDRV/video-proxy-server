@@ -8,6 +8,9 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+// Для загрузки бинарных данных (картинок) нужен raw middleware
+app.use(express.raw({ type: 'application/octet-stream', limit: '20mb' }));
+
 const TMP_DIR = path.join(__dirname, 'tmp');
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 
@@ -66,7 +69,7 @@ app.post('/download', async (req, res) => {
     /youtube\.com\/(c|channel|user)\//
   ];
   if (profilePatterns.some(p => p.test(url))) {
-    return res.status(400).json({ error: 'Profile links are not supported. Send a direct link to video/image/story.' });
+    return res.status(400).json({ error: 'Profile links are not supported.' });
   }
 
   console.log(`Processing: ${url}`);
@@ -74,21 +77,22 @@ app.post('/download', async (req, res) => {
   try {
     const filenameBase = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
     
-    // ОДИН ВЫЗОВ: скачиваем сразу в файл с плейсхолдером расширения
+    // Скачиваем сразу на диск с плейсхолдером расширения
     await ytdlp(url, {
       output: path.join(TMP_DIR, `${filenameBase}.%(ext)s`),
       format: 'best',
       noWarnings: true,
       ignoreErrors: false,
       restrictFilenames: true,
-      // Для каруселей TikTok/Insta yt-dlp сам создаст несколько файлов
-      playlistEnd: 10 // Ограничиваем 10 файлами (лимит Telegram media group)
+      socketTimeout: 30,
+      fragmentRetries: 3,
+      retries: 2
     });
 
     // Ищем все файлы с этим префиксом
     const files = fs.readdirSync(TMP_DIR)
       .filter(f => f.startsWith(filenameBase))
-      .sort(); // Сортируем, чтобы сохранить порядок слайдов
+      .sort();
 
     if (files.length === 0) {
       throw new Error('yt-dlp returned no files');
@@ -97,17 +101,17 @@ app.post('/download', async (req, res) => {
     const baseUrl = req.protocol + '://' + req.get('host');
     const media = files.map(file => {
       const ext = path.extname(file).toLowerCase();
-      const isVideo = ['.mp4', '.mov', '.webm'].includes(ext);
+      const isVideo = ['.mp4', '.mov', '.webm', '.mkv'].includes(ext);
       return {
         url: `${baseUrl}/file/${file}`,
         type: isVideo ? 'video' : 'photo'
       };
     });
 
-    console.log(`[${media.length} files] Returning media group`);
+    console.log(`[${media.length} files] Type: ${media[0].type}`);
     res.json({ media });
 
-    // Автоудаление всех файлов через 5 минут
+    // Автоудаление через 5 минут
     setTimeout(() => {
       for (const file of files) {
         const filepath = path.join(TMP_DIR, file);
@@ -118,15 +122,13 @@ app.post('/download', async (req, res) => {
 
   } catch (error) {
     console.error('[DOWNLOAD ERROR]:', error.message);
-    const isUnsupported = error.message.includes('Unsupported URL') || 
-                          error.message.includes('ERROR: Unsupported URL');
     
-    res.status(500).json({ 
-      error: 'Download failed', 
-      details: isUnsupported 
-        ? 'This link format is not supported. Try a direct video/photo link.' 
-        : error.message 
-    });
+    const isTikTokPhoto = /tiktok\.com.*\/photo\//.test(url);
+    const errorMsg = isTikTokPhoto 
+      ? 'TikTok photo posts are slow to process. Try a direct video link.'
+      : 'Download failed. Link may be private or unsupported.';
+
+    res.status(500).json({ error: errorMsg, details: error.message });
   }
 });
 
