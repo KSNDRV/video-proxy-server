@@ -11,7 +11,7 @@ app.use(cors());
 const TMP_DIR = path.join(__dirname, 'tmp');
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 
-// Эндпоинт для отдачи файла
+// Эндпоинт для отдачи файла Telegram'у
 app.get('/file/:filename', (req, res) => {
   const filepath = path.join(TMP_DIR, req.params.filename);
   if (!fs.existsSync(filepath)) return res.status(404).send('File not found or expired');
@@ -24,11 +24,42 @@ app.get('/file/:filename', (req, res) => {
   fs.createReadStream(filepath).pipe(res);
 });
 
+// Загрузка картинок из бота (прямой upload)
+app.post('/upload-image', (req, res) => {
+  try {
+    const buffer = req.body;
+    if (!buffer || buffer.length === 0) {
+      return res.status(400).json({ error: 'Empty body' });
+    }
+
+    const filename = `img-${Date.now()}-${Math.random().toString(36).substring(7)}.jpg`;
+    const filepath = path.join(TMP_DIR, filename);
+
+    fs.writeFileSync(filepath, buffer);
+    
+    const baseUrl = req.protocol + '://' + req.get('host');
+    const imageUrl = `${baseUrl}/file/${filename}`;
+    
+    console.log(`[UPLOAD] Image saved: ${filename}`);
+    res.json({ imageUrl });
+
+    setTimeout(() => {
+      if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+      console.log(`[CLEANUP] Deleted image: ${filename}`);
+    }, 5 * 60 * 1000);
+
+  } catch (error) {
+    console.error('[UPLOAD ERROR]:', error.message);
+    res.status(500).json({ error: 'Upload failed', details: error.message });
+  }
+});
+
+// Универсальный эндпоинт скачивания (видео, фото, карусели)
 app.post('/download', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'No URL' });
 
-  // 🔒 ФИЛЬТР ПРОФИЛЕЙ: блокируем ссылки без конкретного контента
+  // 🔒 Фильтр профилей
   const profilePatterns = [
     /tiktok\.com\/@[\w.-]+\/?$/,
     /instagram\.com\/[\w.-]+\/?$/,
@@ -41,80 +72,61 @@ app.post('/download', async (req, res) => {
   console.log(`Processing: ${url}`);
 
   try {
-    // 1. Получаем метаданные БЕЗ скачивания
-    const info = await ytdlp(url, {
-      dumpSingleJson: true,
+    const filenameBase = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+    
+    // ОДИН ВЫЗОВ: скачиваем сразу в файл с плейсхолдером расширения
+    await ytdlp(url, {
+      output: path.join(TMP_DIR, `${filenameBase}.%(ext)s`),
+      format: 'best',
       noWarnings: true,
-      ignoreErrors: true
+      ignoreErrors: false,
+      restrictFilenames: true,
+      // Для каруселей TikTok/Insta yt-dlp сам создаст несколько файлов
+      playlistEnd: 10 // Ограничиваем 10 файлами (лимит Telegram media group)
     });
 
-    if (!info) throw new Error('Failed to extract media info');
+    // Ищем все файлы с этим префиксом
+    const files = fs.readdirSync(TMP_DIR)
+      .filter(f => f.startsWith(filenameBase))
+      .sort(); // Сортируем, чтобы сохранить порядок слайдов
 
-    // 2. Определяем тип и собираем список файлов для скачивания
-    const filesToDownload = [];
-    
-    // Обработка каруселей (TikTok/Insta)
-    if (info.entries && Array.isArray(info.entries)) {
-      for (const entry of info.entries) {
-        const isVideo = entry.ext === 'mp4' || entry.format_id?.includes('video');
-        const ext = isVideo ? 'mp4' : (entry.ext || 'jpg');
-        const filename = `${Date.now()}-${Math.random().toString(36).substring(7)}-${filesToDownload.length}.${ext}`;
-        filesToDownload.push({ url: entry.url || url, filepath: path.join(TMP_DIR, filename), isVideo, filename });
-      }
-    } 
-    // Одиночный контент
-    else {
-      const isVideo = info.ext === 'mp4' || info.format_id?.includes('video');
-      const ext = isVideo ? 'mp4' : (info.ext || 'jpg');
-      const filename = `${Date.now()}-${Math.random().toString(36).substring(7)}.${ext}`;
-      filesToDownload.push({ url, filepath: path.join(TMP_DIR, filename), isVideo, filename });
+    if (files.length === 0) {
+      throw new Error('yt-dlp returned no files');
     }
 
-    if (filesToDownload.length === 0) throw new Error('No media found');
-
-    // 3. Скачиваем все файлы
-    for (const file of filesToDownload) {
-      await ytdlp(file.url, {
-        output: file.filepath,
-        format: file.isVideo ? 'best[ext=mp4]' : 'bestimage',
-        noWarnings: true,
-        ignoreErrors: true
-      });
-      
-      if (!fs.existsSync(file.filepath)) {
-        console.warn(`Failed to download: ${file.filename}`);
-        // Удаляем неудачный файл из списка
-        const idx = filesToDownload.indexOf(file);
-        if (idx > -1) filesToDownload.splice(idx, 1);
-      }
-    }
-
-    if (filesToDownload.length === 0) throw new Error('All downloads failed');
-
-    // 4. Формируем ответ
     const baseUrl = req.protocol + '://' + req.get('host');
-    const result = {
-      author: info.uploader || info.channel || undefined,
-      media: filesToDownload.map(f => ({
-        url: `${baseUrl}/file/${f.filename}`,
-        type: f.isVideo ? 'video' : 'photo'
-      }))
-    };
+    const media = files.map(file => {
+      const ext = path.extname(file).toLowerCase();
+      const isVideo = ['.mp4', '.mov', '.webm'].includes(ext);
+      return {
+        url: `${baseUrl}/file/${file}`,
+        type: isVideo ? 'video' : 'photo'
+      };
+    });
 
-    console.log(`[${filesToDownload.length} files] Returning media group`);
-    res.json(result);
+    console.log(`[${media.length} files] Returning media group`);
+    res.json({ media });
 
-    // 5. Автоудаление через 5 минут
+    // Автоудаление всех файлов через 5 минут
     setTimeout(() => {
-      for (const f of filesToDownload) {
-        if (fs.existsSync(f.filepath)) fs.unlinkSync(f.filepath);
+      for (const file of files) {
+        const filepath = path.join(TMP_DIR, file);
+        if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
       }
-      console.log(`Cleaned up ${filesToDownload.length} files`);
+      console.log(`Cleaned up ${files.length} files`);
     }, 5 * 60 * 1000);
 
   } catch (error) {
     console.error('[DOWNLOAD ERROR]:', error.message);
-    res.status(500).json({ error: 'Download failed', details: error.message });
+    const isUnsupported = error.message.includes('Unsupported URL') || 
+                          error.message.includes('ERROR: Unsupported URL');
+    
+    res.status(500).json({ 
+      error: 'Download failed', 
+      details: isUnsupported 
+        ? 'This link format is not supported. Try a direct video/photo link.' 
+        : error.message 
+    });
   }
 });
 
