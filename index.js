@@ -1,8 +1,11 @@
 const express = require('express');
 const cors = require('cors');
-const ytdlp = require('yt-dlp-exec');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const util = require('util');
+
+const execFileAsync = util.promisify(execFile);
 
 const app = express();
 app.use(express.json());
@@ -11,6 +14,8 @@ app.use(express.raw({ type: 'application/octet-stream', limit: '20mb' }));
 
 const TMP_DIR = path.join(__dirname, 'tmp');
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
+
+// ... (эндпоинты /file и /upload-image остаются без изменений) ...
 
 app.get('/file/:filename', (req, res) => {
   const filepath = path.join(TMP_DIR, req.params.filename);
@@ -57,6 +62,7 @@ app.post('/download', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'No URL' });
 
+  // Фильтр профилей
   const profilePatterns = [
     /tiktok\.com\/@[\w.-]+\/?$/,
     /instagram\.com\/[\w.-]+\/?$/,
@@ -70,17 +76,20 @@ app.post('/download', async (req, res) => {
 
   try {
     const filenameBase = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+    const outputPath = path.join(TMP_DIR, `${filenameBase}.%(ext)s`);
     
-    await ytdlp(url, {
-      output: path.join(TMP_DIR, `${filenameBase}.%(ext)s`),
-      format: 'best',
-      noWarnings: true,
-      ignoreErrors: true,
-      restrictFilenames: true,
-      socketTimeout: 30,
-      fragmentRetries: 3,
-      retries: 2
-    });
+    // Вызываем системный yt-dlp напрямую
+    await execFileAsync('yt-dlp', [
+      url,
+      '-o', outputPath,
+      '-f', 'best',
+      '--no-warnings',
+      '--ignore-errors',
+      '--restrict-filenames',
+      '--socket-timeout', '30',
+      '--fragment-retries', '3',
+      '--retries', '2'
+    ], { timeout: 60000 }); // Таймаут 60 сек на весь процесс
 
     const files = fs.readdirSync(TMP_DIR)
       .filter(f => f.startsWith(filenameBase))
@@ -114,12 +123,14 @@ app.post('/download', async (req, res) => {
   } catch (error) {
     console.error('[DOWNLOAD ERROR]:', error.message);
     
-    const isUnsupported = error.message.includes('Unsupported URL');
+    const isUnsupported = error.message.includes('Unsupported URL') || 
+                          error.stderr?.includes('Unsupported URL');
+    
     res.status(500).json({ 
       error: isUnsupported 
         ? 'Link format not supported. Try a direct video/photo link.' 
         : 'Download failed.',
-      details: error.message 
+      details: error.message || error.stderr 
     });
   }
 });
