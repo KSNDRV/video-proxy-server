@@ -7,14 +7,11 @@ const path = require('path');
 const app = express();
 app.use(express.json());
 app.use(cors());
-
-// Для загрузки бинарных данных (картинок) нужен raw middleware
 app.use(express.raw({ type: 'application/octet-stream', limit: '20mb' }));
 
 const TMP_DIR = path.join(__dirname, 'tmp');
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 
-// Эндпоинт для отдачи файла Telegram'у
 app.get('/file/:filename', (req, res) => {
   const filepath = path.join(TMP_DIR, req.params.filename);
   if (!fs.existsSync(filepath)) return res.status(404).send('File not found or expired');
@@ -27,7 +24,6 @@ app.get('/file/:filename', (req, res) => {
   fs.createReadStream(filepath).pipe(res);
 });
 
-// Загрузка картинок из бота (прямой upload)
 app.post('/upload-image', (req, res) => {
   try {
     const buffer = req.body;
@@ -57,12 +53,10 @@ app.post('/upload-image', (req, res) => {
   }
 });
 
-// Универсальный эндпоинт скачивания (видео, фото, карусели)
 app.post('/download', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'No URL' });
 
-  // 🔒 Фильтр профилей
   const profilePatterns = [
     /tiktok\.com\/@[\w.-]+\/?$/,
     /instagram\.com\/[\w.-]+\/?$/,
@@ -75,22 +69,13 @@ app.post('/download', async (req, res) => {
   console.log(`Processing: ${url}`);
 
   try {
-    // ШАГ 1: Быстрая проверка ссылки БЕЗ скачивания
-    // --simulate просто проверяет, может ли yt-dlp вообще работать с этой ссылкой
-    await ytdlp(url, {
-      simulate: true,
-      noWarnings: true,
-      socketTimeout: 10
-    });
-
-    // Если дошли сюда — ссылка валидна, можно качать
     const filenameBase = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
     
     await ytdlp(url, {
       output: path.join(TMP_DIR, `${filenameBase}.%(ext)s`),
       format: 'best',
       noWarnings: true,
-      ignoreErrors: true, // ← ВАЖНО: разрешаем игнорировать мелкие ошибки
+      ignoreErrors: true,
       restrictFilenames: true,
       socketTimeout: 30,
       fragmentRetries: 3,
@@ -123,17 +108,16 @@ app.post('/download', async (req, res) => {
         const filepath = path.join(TMP_DIR, file);
         if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
       }
+      console.log(`Cleaned up ${files.length} files`);
     }, 5 * 60 * 1000);
 
   } catch (error) {
     console.error('[DOWNLOAD ERROR]:', error.message);
     
-    const isUnsupported = error.message.includes('Unsupported URL') || 
-                          error.message.includes('ERROR: Unsupported URL');
-    
+    const isUnsupported = error.message.includes('Unsupported URL');
     res.status(500).json({ 
       error: isUnsupported 
-        ? 'This link format is not supported by current yt-dlp version. Try a direct video link.' 
+        ? 'Link format not supported. Try a direct video/photo link.' 
         : 'Download failed.',
       details: error.message 
     });
