@@ -75,21 +75,28 @@ app.post('/download', async (req, res) => {
   console.log(`Processing: ${url}`);
 
   try {
+    // ШАГ 1: Быстрая проверка ссылки БЕЗ скачивания
+    // --simulate просто проверяет, может ли yt-dlp вообще работать с этой ссылкой
+    await ytdlp(url, {
+      simulate: true,
+      noWarnings: true,
+      socketTimeout: 10
+    });
+
+    // Если дошли сюда — ссылка валидна, можно качать
     const filenameBase = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
     
-    // Скачиваем сразу на диск с плейсхолдером расширения
     await ytdlp(url, {
       output: path.join(TMP_DIR, `${filenameBase}.%(ext)s`),
       format: 'best',
       noWarnings: true,
-      ignoreErrors: false,
+      ignoreErrors: true, // ← ВАЖНО: разрешаем игнорировать мелкие ошибки
       restrictFilenames: true,
       socketTimeout: 30,
       fragmentRetries: 3,
       retries: 2
     });
 
-    // Ищем все файлы с этим префиксом
     const files = fs.readdirSync(TMP_DIR)
       .filter(f => f.startsWith(filenameBase))
       .sort();
@@ -111,24 +118,25 @@ app.post('/download', async (req, res) => {
     console.log(`[${media.length} files] Type: ${media[0].type}`);
     res.json({ media });
 
-    // Автоудаление через 5 минут
     setTimeout(() => {
       for (const file of files) {
         const filepath = path.join(TMP_DIR, file);
         if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
       }
-      console.log(`Cleaned up ${files.length} files`);
     }, 5 * 60 * 1000);
 
   } catch (error) {
     console.error('[DOWNLOAD ERROR]:', error.message);
     
-    const isTikTokPhoto = /tiktok\.com.*\/photo\//.test(url);
-    const errorMsg = isTikTokPhoto 
-      ? 'TikTok photo posts are slow to process. Try a direct video link.'
-      : 'Download failed. Link may be private or unsupported.';
-
-    res.status(500).json({ error: errorMsg, details: error.message });
+    const isUnsupported = error.message.includes('Unsupported URL') || 
+                          error.message.includes('ERROR: Unsupported URL');
+    
+    res.status(500).json({ 
+      error: isUnsupported 
+        ? 'This link format is not supported by current yt-dlp version. Try a direct video link.' 
+        : 'Download failed.',
+      details: error.message 
+    });
   }
 });
 
