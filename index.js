@@ -45,8 +45,7 @@ app.post('/download', async (req, res) => {
     const info = await ytdlp(url, {
       dumpSingleJson: true,
       noWarnings: true,
-      ignoreErrors: true,
-      extractAudio: false
+      ignoreErrors: true
     });
 
     if (!info) throw new Error('Failed to extract media info');
