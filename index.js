@@ -15,8 +15,7 @@ app.use(express.raw({ type: 'application/octet-stream', limit: '20mb' }));
 const TMP_DIR = path.join(__dirname, 'tmp');
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 
-// ... (эндпоинты /file и /upload-image остаются без изменений) ...
-
+// Эндпоинт для отдачи файла (нужен для upload-image)
 app.get('/file/:filename', (req, res) => {
   const filepath = path.join(TMP_DIR, req.params.filename);
   if (!fs.existsSync(filepath)) return res.status(404).send('File not found or expired');
@@ -29,6 +28,7 @@ app.get('/file/:filename', (req, res) => {
   fs.createReadStream(filepath).pipe(res);
 });
 
+// Загрузка картинок из бота (прямой upload)
 app.post('/upload-image', (req, res) => {
   try {
     const buffer = req.body;
@@ -58,6 +58,7 @@ app.post('/upload-image', (req, res) => {
   }
 });
 
+// Универсальный эндпоинт: получаем ПРЯМУЮ ссылку на файл
 app.post('/download', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'No URL' });
@@ -75,62 +76,44 @@ app.post('/download', async (req, res) => {
   console.log(`Processing: ${url}`);
 
   try {
-    const filenameBase = `${Date.now()}-${Math.random().toString(36).substring(7)}`;
-    const outputPath = path.join(TMP_DIR, `${filenameBase}.%(ext)s`);
-    
-    // Вызываем системный yt-dlp напрямую
-    await execFileAsync('yt-dlp', [
-      url,
-      '-o', outputPath,
-      '-f', 'best',
+    // ШАГ 1: Получаем прямую ссылку через yt-dlp --get-url
+    const { stdout, stderr } = await execFileAsync('yt-dlp', [
+      '--get-url',
+      '--flat-playlist',
       '--no-warnings',
-      '--ignore-errors',
-      '--restrict-filenames',
-      '--socket-timeout', '30',
-      '--fragment-retries', '3',
-      '--retries', '2'
-    ], { timeout: 60000 }); // Таймаут 60 сек на весь процесс
+      '--socket-timeout', '15',
+      url
+    ], { timeout: 30000 });
 
-    const files = fs.readdirSync(TMP_DIR)
-      .filter(f => f.startsWith(filenameBase))
-      .sort();
+    // Разбиваем ответ по переносам строк
+    const urls = stdout.trim().split('\n').filter(u => u.startsWith('http'));
 
-    if (files.length === 0) {
-      throw new Error('yt-dlp returned no files');
+    if (urls.length === 0) {
+      throw new Error('No direct URLs found');
     }
 
-    const baseUrl = req.protocol + '://' + req.get('host');
-    const media = files.map(file => {
-      const ext = path.extname(file).toLowerCase();
-      const isVideo = ['.mp4', '.mov', '.webm', '.mkv'].includes(ext);
+    // Возвращаем все найденные ссылки как media group
+    const media = urls.map(u => {
+      const isVideo = /\.(mp4|mov|webm|m3u8)$/i.test(u);
       return {
-        url: `${baseUrl}/file/${file}`,
+        url: u,
         type: isVideo ? 'video' : 'photo'
       };
     });
 
-    console.log(`[${media.length} files] Type: ${media[0].type}`);
+    console.log(`[${media.length} URLs] Returning direct links`);
     res.json({ media });
 
-    setTimeout(() => {
-      for (const file of files) {
-        const filepath = path.join(TMP_DIR, file);
-        if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
-      }
-      console.log(`Cleaned up ${files.length} files`);
-    }, 5 * 60 * 1000);
-
   } catch (error) {
-    console.error('[DOWNLOAD ERROR]:', error.message);
+    console.error('[DOWNLOAD ERROR]:', error.message, '\nSTDERR:', error.stderr);
     
-    const isUnsupported = error.message.includes('Unsupported URL') || 
-                          error.stderr?.includes('Unsupported URL');
+    const errorMsg = error.stderr?.includes('Unsupported URL') 
+      ? 'Link format not supported. Try a direct video/photo link.'
+      : 'Download failed. Platform may block this link.';
     
     res.status(500).json({ 
-      error: isUnsupported 
-        ? 'Link format not supported. Try a direct video/photo link.' 
-        : 'Download failed.',
-      details: error.message || error.stderr 
+      error: errorMsg,
+      details: error.stderr || error.message 
     });
   }
 });
