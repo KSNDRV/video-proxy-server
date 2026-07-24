@@ -1,122 +1,75 @@
 const express = require('express');
 const cors = require('cors');
-const { execFile } = require('child_process');
+const ytdlp = require('yt-dlp-exec');
+const igDirect = require('instagram-url-direct');
 const fs = require('fs');
 const path = require('path');
-const util = require('util');
 
-const execFileAsync = util.promisify(execFile);
-
-const app = express();
-app.use(express.json());
-app.use(cors());
-app.use(express.raw({ type: 'application/octet-stream', limit: '20mb' }));
-
+@@ -12,6 +11,7 @@ app.use(cors());
 const TMP_DIR = path.join(__dirname, 'tmp');
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 
-// Эндпоинт для отдачи файла (нужен для upload-image)
+// Эндпоинт для отдачи файла Telegram'у
 app.get('/file/:filename', (req, res) => {
-  const filepath = path.join(TMP_DIR, req.params.filename);
-  if (!fs.existsSync(filepath)) return res.status(404).send('File not found or expired');
-  
-  const ext = path.extname(filepath).toLowerCase();
-  const contentType = ['.jpg', '.jpeg'].includes(ext) ? 'image/jpeg' : 
-                      ext === '.png' ? 'image/png' : 'video/mp4';
-                      
-  res.setHeader('Content-Type', contentType);
-  fs.createReadStream(filepath).pipe(res);
-});
+const filepath = path.join(TMP_DIR, req.params.filename);
+if (!fs.existsSync(filepath)) return res.status(404).send('File not found or expired');
+@@ -27,41 +27,36 @@ app.post('/download', async (req, res) => {
+console.log(`Processing: ${url}`);
 
-// Загрузка картинок из бота (прямой upload)
-app.post('/upload-image', (req, res) => {
-  try {
-    const buffer = req.body;
-    if (!buffer || buffer.length === 0) {
-      return res.status(400).json({ error: 'Empty body' });
+try {
+    let directUrl = null;
+
+    if (url.includes('instagram.com')) {
+      console.log('[SERVER] Using instagram-url-direct...');
+      const result = await igDirect(url);
+      directUrl = result.video_url || result.display_url || result.thumbnail_src;
+    } else {
+      console.log('[SERVER] Using yt-dlp...');
+      const output = await ytdlp(url, {
+        dumpSingleJson: true,
+        noWarnings: true,
+        format: 'best[ext=mp4]/best'
+      });
+      directUrl = output.url || output.requested_formats?.[0]?.url;
     }
 
-    const filename = `img-${Date.now()}-${Math.random().toString(36).substring(7)}.jpg`;
-    const filepath = path.join(TMP_DIR, filename);
+    if (!directUrl) throw new Error('No direct URL found');
 
+    // Генерируем уникальное имя файла
+const filename = `${Date.now()}-${Math.random().toString(36).substring(7)}.mp4`;
+const filepath = path.join(TMP_DIR, filename);
+
+    const fileRes = await fetch(directUrl);
+    if (!fileRes.ok) throw new Error(`Failed to fetch video: ${fileRes.status}`);
+    
+    const buffer = Buffer.from(await fileRes.arrayBuffer());
     fs.writeFileSync(filepath, buffer);
-    
-    const baseUrl = req.protocol + '://' + req.get('host');
-    const imageUrl = `${baseUrl}/file/${filename}`;
-    
-    console.log(`[UPLOAD] Image saved: ${filename}`);
-    res.json({ imageUrl });
+    // yt-dlp САМ скачивает файл, используя правильные заголовки и обходя 403
+    await ytdlp(url, {
+      output: filepath,
+      format: 'best[ext=mp4]/best',
+      noWarnings: true,
+      noCheckCertificates: true,
+      // Для Instagram иногда помогает игнорирование ошибок загрузки метаданных
+      ignoreErrors: true 
+    });
 
-    setTimeout(() => {
-      if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
-      console.log(`[CLEANUP] Deleted image: ${filename}`);
-    }, 5 * 60 * 1000);
-
-  } catch (error) {
-    console.error('[UPLOAD ERROR]:', error.message);
-    res.status(500).json({ error: 'Upload failed', details: error.message });
-  }
-});
-
-// Универсальный эндпоинт: получаем ПРЯМУЮ ссылку на файл
-app.post('/download', async (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: 'No URL' });
-
-  // Фильтр профилей
-  const profilePatterns = [
-    /tiktok\.com\/@[\w.-]+\/?$/,
-    /instagram\.com\/[\w.-]+\/?$/,
-    /youtube\.com\/(c|channel|user)\//
-  ];
-  if (profilePatterns.some(p => p.test(url))) {
-    return res.status(400).json({ error: 'Profile links are not supported.' });
-  }
-
-  console.log(`Processing: ${url}`);
-
-  try {
-    // ШАГ 1: Получаем прямую ссылку через yt-dlp --get-url
-    const { stdout, stderr } = await execFileAsync('yt-dlp', [
-      '--get-url',
-      '--flat-playlist',
-      '--no-warnings',
-      '--socket-timeout', '15',
-      url
-    ], { timeout: 30000 });
-
-    // Разбиваем ответ по переносам строк
-    const urls = stdout.trim().split('\n').filter(u => u.startsWith('http'));
-
-    if (urls.length === 0) {
-      throw new Error('No direct URLs found');
+    // Проверяем, что файл действительно создался
+    if (!fs.existsSync(filepath)) {
+      throw new Error('yt-dlp failed to create file');
     }
 
-    // Возвращаем все найденные ссылки как media group
-    const media = urls.map(u => {
-      const isVideo = /\.(mp4|mov|webm|m3u8)$/i.test(u);
-      return {
-        url: u,
-        type: isVideo ? 'video' : 'photo'
-      };
-    });
+    // Возвращаем ссылку НА НАШ СЕРВЕР
+const baseUrl = req.protocol + '://' + req.get('host');
+const videoUrl = `${baseUrl}/file/${filename}`;
 
-    console.log(`[${media.length} URLs] Returning direct links`);
-    res.json({ media });
+console.log(`Returning self-hosted URL: ${videoUrl}`);
+res.json({ videoUrl });
 
-  } catch (error) {
-    console.error('[DOWNLOAD ERROR]:', error.message, '\nSTDERR:', error.stderr);
-    
-    const errorMsg = error.stderr?.includes('Unsupported URL') 
-      ? 'Link format not supported. Try a direct video/photo link.'
-      : 'Download failed. Platform may block this link.';
-    
-    res.status(500).json({ 
-      error: errorMsg,
-      details: error.stderr || error.message 
-    });
-  }
-});
+    // Удаляем файл через 5 минут
+setTimeout(() => {
+if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+      console.log(`Cleaned up: ${filename}`);
+}, 5 * 60 * 1000);
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+} catch (error) {
