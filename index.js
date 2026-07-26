@@ -199,6 +199,27 @@ function scheduleCleanup(media, baseUrl) {
   }, 5 * 60 * 1000);
 }
 
+app.get('/debug/cobalt', async (req, res) => {
+  try {
+    const started = Date.now();
+    const r = await fetch(COBALT_API_URL + '/');
+    const data = await r.json();
+    res.json({
+      reachable: true,
+      cobalt_api_url_used: COBALT_API_URL,
+      response_time_ms: Date.now() - started,
+      cobalt_version: data.cobalt?.version,
+      services: data.cobalt?.services
+    });
+  } catch (err) {
+    res.status(500).json({
+      reachable: false,
+      cobalt_api_url_used: COBALT_API_URL,
+      error: err.message
+    });
+  }
+});
+
 app.post('/download', async (req, res) => {
   const { url: rawUrl } = req.body;
   if (!rawUrl) return res.status(400).json({ error: 'No URL' });
