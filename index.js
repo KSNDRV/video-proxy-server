@@ -199,6 +199,17 @@ function scheduleCleanup(media, baseUrl) {
   }, 5 * 60 * 1000);
 }
 
+// Бот на стороне Telegram ожидает старый формат { videoUrl }.
+// Сохраняем это поле для обратной совместимости, но не убираем media —
+// если позже понадобится слать несколько картинок из одного TikTok-поста,
+// media[] уже под рукой.
+function toCompatResponse(result) {
+  return {
+    videoUrl: result.media[0]?.url || null,
+    media: result.media
+  };
+}
+
 app.get('/debug/cobalt', async (req, res) => {
   try {
     const started = Date.now();
@@ -242,7 +253,7 @@ app.post('/download', async (req, res) => {
     const result = await tryCobalt(url, baseUrl);
     if (result) {
       console.log(`[COBALT OK] ${result.media.length} files, type: ${result.media[0].type}`);
-      res.json(result);
+      res.json(toCompatResponse(result));
       scheduleCleanup(result.media, baseUrl);
       return;
     }
@@ -256,7 +267,7 @@ app.post('/download', async (req, res) => {
   try {
     const result = await tryYtDlp(url, baseUrl);
     console.log(`[YTDLP OK] ${result.media.length} files, type: ${result.media[0].type}`);
-    res.json(result);
+    res.json(toCompatResponse(result));
     scheduleCleanup(result.media, baseUrl);
   } catch (error) {
     console.error('[DOWNLOAD ERROR]:', error.message);
