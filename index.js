@@ -15,7 +15,8 @@ app.use(express.raw({ type: 'application/octet-stream', limit: '20mb' }));
 const TMP_DIR = path.join(__dirname, 'tmp');
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 
-const COBALT_API_URL = process.env.COBALT_API_URL || 'http://localhost:9000';
+// ВАЖНО: Для Cobalt v10+ правильный эндпоинт - /api, а не /api/json
+const COBALT_API_URL = process.env.COBALT_API_URL || 'http://localhost:9000/api';
 
 app.get('/file/:filename', (req, res) => {
   const filepath = path.join(TMP_DIR, req.params.filename);
@@ -67,7 +68,6 @@ function cleanUrl(url) {
   }
 }
 
-// Скачивает файл по прямой ссылке (cobalt tunnel/redirect url) в TMP_DIR
 async function downloadToTmp(fileUrl, extHint) {
   const res = await fetch(fileUrl);
   if (!res.ok) throw new Error(`Failed to fetch resolved media: ${res.status}`);
@@ -90,10 +90,13 @@ function guessExtFromContentType(ct) {
   return '.bin';
 }
 
-// Пытается скачать через self-hosted cobalt instance.
-// Возвращает { media: [{url, type}] } или null, если cobalt не смог обработать ссылку.
 async function tryCobalt(url, baseUrl) {
-  const res = await fetch(COBALT_API_URL + '/', {
+  // Используем полный URL с правильным эндпоинтом
+  const fullUrl = COBALT_API_URL.startsWith('http') ? COBALT_API_URL : `http://localhost:9000${COBALT_API_URL}`;
+  
+  console.log(`[COBALT] Запрос на: ${fullUrl}`);
+  
+  const res = await fetch(fullUrl, {
     method: 'POST',
     headers: {
       'Accept': 'application/json',
@@ -102,7 +105,17 @@ async function tryCobalt(url, baseUrl) {
     body: JSON.stringify({ url })
   });
 
-  const data = await res.json();
+  // Сначала читаем как текст, чтобы увидеть HTML если он есть
+  const rawText = await res.text();
+  console.log(`[COBALT] Status: ${res.status}, Content-Type: ${res.headers.get('content-type')}`);
+  
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch (e) {
+    console.error('[COBALT] Не удалось распарсить JSON. Ответ:', rawText.substring(0, 500));
+    return null;
+  }
 
   if (data.status === 'error') {
     console.log('[COBALT ERROR]:', data.error?.code, data.error?.context);
@@ -120,8 +133,6 @@ async function tryCobalt(url, baseUrl) {
   }
 
   if (data.status === 'local-processing') {
-    // tunnel — массив URL кусков. Для наших целей просто скачиваем каждый —
-    // полноценный локальный ремукс/склейку не реализуем.
     for (const tunnelUrl of data.tunnel) {
       const filename = await downloadToTmp(tunnelUrl);
       const ext = path.extname(filename).toLowerCase();
@@ -132,7 +143,6 @@ async function tryCobalt(url, baseUrl) {
   }
 
   if (data.status === 'picker') {
-    // Слайд-шоу TikTok / несколько медиа на выбор — именно это не умел yt-dlp
     for (const item of data.picker) {
       const ext = item.type === 'video' ? '.mp4' : item.type === 'gif' ? '.gif' : '.jpg';
       const filename = await downloadToTmp(item.url, ext);
@@ -199,10 +209,6 @@ function scheduleCleanup(media, baseUrl) {
   }, 5 * 60 * 1000);
 }
 
-// Бот на стороне Telegram ожидает старый формат { videoUrl }.
-// Сохраняем это поле для обратной совместимости, но не убираем media —
-// если позже понадобится слать несколько картинок из одного TikTok-поста,
-// media[] уже под рукой.
 function toCompatResponse(result) {
   return {
     videoUrl: result.media[0]?.url || null,
@@ -213,14 +219,26 @@ function toCompatResponse(result) {
 app.get('/debug/cobalt', async (req, res) => {
   try {
     const started = Date.now();
-    const r = await fetch(COBALT_API_URL + '/');
-    const data = await r.json();
+    const fullUrl = COBALT_API_URL.startsWith('http') ? COBALT_API_URL : `http://localhost:9000${COBALT_API_URL}`;
+    
+    const r = await fetch(fullUrl, { 
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify({ url: 'https://example.com' }) 
+    });
+    
+    const text = await r.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+
     res.json({
-      reachable: true,
-      cobalt_api_url_used: COBALT_API_URL,
-      response_time_ms: Date.now() - started,
-      cobalt_version: data.cobalt?.version,
-      services: data.cobalt?.services
+      reachable: r.ok,
+      status_code: r.status,
+      content_type: r.headers.get('content-type'),
+      response_preview: text.substring(0, 300),
+      parsed_json: json,
+      cobalt_api_url_used: fullUrl,
+      response_time_ms: Date.now() - started
     });
   } catch (err) {
     res.status(500).json({
